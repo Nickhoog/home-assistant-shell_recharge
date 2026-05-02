@@ -5,15 +5,13 @@ from __future__ import annotations
 from asyncio import CancelledError
 from typing import Any
 
+import logging
 import voluptuous as vol
 from aiohttp.client_exceptions import ClientError
 from homeassistant import config_entries
 from homeassistant.data_entry_flow import section
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
-    NumberSelector,
-    NumberSelectorConfig,
-    NumberSelectorMode,
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
@@ -25,6 +23,8 @@ from .const import DOMAIN
 
 import shellrecharge
 
+_LOGGER = logging.getLogger(__name__)
+
 RECHARGE_SCHEMA = vol.Schema(
     {
         vol.Optional("public"): section(
@@ -34,17 +34,13 @@ RECHARGE_SCHEMA = vol.Schema(
                     vol.Required("client_secret"): TextSelector(
                         TextSelectorConfig(type=TextSelectorType.PASSWORD)
                     ),
-                    vol.Required("latitude"): NumberSelector(
-                        NumberSelectorConfig(mode=NumberSelectorMode.BOX, step=0.000001)
+                    vol.Required("latitude"): vol.Coerce(float),
+                    vol.Required("longitude"): vol.Coerce(float),
+                    vol.Optional("radius", default=5000): vol.All(
+                        vol.Coerce(int), vol.Range(min=100, max=50000)
                     ),
-                    vol.Required("longitude"): NumberSelector(
-                        NumberSelectorConfig(mode=NumberSelectorMode.BOX, step=0.000001)
-                    ),
-                    vol.Optional("radius", default=5000): NumberSelector(
-                        NumberSelectorConfig(mode=NumberSelectorMode.BOX, min=100, max=50000, step=100)
-                    ),
-                    vol.Optional("limit", default=25): NumberSelector(
-                        NumberSelectorConfig(mode=NumberSelectorMode.BOX, min=1, max=100, step=1)
+                    vol.Optional("limit", default=25): vol.All(
+                        vol.Coerce(int), vol.Range(min=1, max=100)
                     ),
                     vol.Optional("serial_number"): str,
                 }
@@ -85,7 +81,12 @@ class ShellRechargeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             pub = user_input.get("public") or {}
             priv = user_input.get("private") or {}
 
-            if pub.get("client_id") and pub.get("client_secret") and pub.get("latitude") is not None and pub.get("longitude") is not None:
+            if (
+                pub.get("client_id")
+                and pub.get("client_secret")
+                and pub.get("latitude") is not None
+                and pub.get("longitude") is not None
+            ):
                 latitude = float(pub["latitude"])
                 longitude = float(pub["longitude"])
                 radius = int(pub.get("radius", 5000))
@@ -118,12 +119,13 @@ class ShellRechargeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             errors["base"] = "login_failed"
         except ShellEvAuthError as exc:
             errors["base"] = "auth_failed"
-            self.hass.logger.error("Shell Recharge authentication failed: %s", exc)
+            _LOGGER.error("Shell Recharge authentication failed: %s", exc)
         except ShellEvLocationNotFoundError as exc:
             errors["base"] = "empty_response"
-            self.hass.logger.error("Shell Recharge no public locations found: %s", exc)
-        except (ClientError, TimeoutError, CancelledError):
+            _LOGGER.error("Shell Recharge no public locations found: %s", exc)
+        except (ClientError, TimeoutError, CancelledError) as exc:
             errors["base"] = "cannot_connect"
+            _LOGGER.error("Shell Recharge connection failed: %s", exc)
 
         if not errors:
             await self.async_set_unique_id(unique_id)
