@@ -31,10 +31,10 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.config_entries.async_update_entry(entry, data=new_data, version=3)
 
     if entry.version == 3:
-        # v3 public entries lack client_id/client_secret; keep data as-is.
-        # The coordinator will raise UpdateFailed with a helpful message when
-        # credentials are missing so the user knows to reconfigure.
         hass.config_entries.async_update_entry(entry, version=4)
+
+    if entry.version == 4:
+        hass.config_entries.async_update_entry(entry, version=5)
 
     _LOGGER.debug("Migration to configuration version %s successful", entry.version)
     return True
@@ -48,15 +48,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator: ShellRechargePublicDataUpdateCoordinator | ShellRechargeUserDataUpdateCoordinator
 
     pub = entry.data.get("public") or {}
-    if pub.get("serial_number"):
+    if pub:
         api = ShellEvApi(
             websession=async_get_clientsession(hass),
             client_id=pub.get("client_id", ""),
             client_secret=pub.get("client_secret", ""),
         )
-        coordinator = ShellRechargePublicDataUpdateCoordinator(
-            hass, api, pub["serial_number"]
-        )
+        if pub.get("serial_number"):
+            coordinator = ShellRechargePublicDataUpdateCoordinator(
+                hass, api, pub["serial_number"]
+            )
+        else:
+            coordinator = ShellRechargePublicDataUpdateCoordinator(
+                hass,
+                api,
+                latitude=float(pub["latitude"]),
+                longitude=float(pub["longitude"]),
+                limit=int(pub.get("limit", 25)),
+            )
     else:
         priv = entry.data.get("private") or {}
         shell_api = shellrecharge.Api(websession=async_get_clientsession(hass))
