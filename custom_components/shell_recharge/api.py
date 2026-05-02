@@ -6,6 +6,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import Any
 
 from aiohttp import ClientSession
 from aiohttp.client_exceptions import ClientError
@@ -168,19 +169,15 @@ class ShellEvApi:
         self._token_expires_at = datetime.now() + timedelta(seconds=max(expires_in - 60, 0))
         return self._access_token
 
-    async def location_by_id(self, location_id: str) -> Location:
-        """Return a Location by its external ID (serial number).
-
-        Searches the /locations endpoint filtered by locationExternalId.
-        """
+    async def _get_json(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+        """GET a Shell EV API endpoint and return the JSON body."""
         token = await self._get_token()
         request_id = str(uuid.uuid4())
 
-        _LOGGER.debug("Fetching Shell EV location for external ID %s", location_id)
         try:
             async with self._session.get(
-                f"{API_BASE}/locations",
-                params={"locationExternalId": location_id, "perPage": 1},
+                f"{API_BASE}{path}",
+                params=params,
                 headers={
                     "Authorization": f"Bearer {token}",
                     "RequestId": request_id,
@@ -193,21 +190,98 @@ class ShellEvApi:
                     self._access_token = None
                     raise ShellEvAuthError("Bearer token rejected by API")
                 if resp.status == 404:
-                    raise ShellEvLocationNotFoundError(
-                        f"Location with external ID '{location_id}' not found"
+                    raise ShellEvLocationNotFoundError(f"Endpoint {path} returned 404")
+                if resp.status >= 400:
+                    body = await resp.text()
+                    raise ShellEvApiError(
+                        f"Shell EV API returned HTTP {resp.status} for {path}: {body[:500]}"
                     )
-                resp.raise_for_status()
-                result = await resp.json()
+                return await resp.json()
         except ClientError as err:
-            raise ShellEvApiError(f"Network error fetching location: {err}") from err
+            raise ShellEvApiError(f"Network error fetching {path}: {err}") from err
 
-        items: list[dict] = result.get("data", [])
-        if not items:
-            raise ShellEvLocationNotFoundError(
-                f"No location returned for external ID '{location_id}'"
+    async def location_by_id(
+        self,
+        location_id: str,
+        latitude: float | None = None,
+        longitude: float | None = None,
+        limit: int = 25,
+    ) -> Location:
+        """Return a Location by external ID.
+
+        The Shell EV OpenAPI spec supports locationExternalId on /locations and
+        /locations/nearby. We try /locations first and optionally fall back to
+        /locations/nearby when latitude/longitude are configured.
+        """
+        location_id = str(location_id).strip()
+        if not location_id:
+            raise ShellEvLocationNotFoundError("No location external ID supplied")
+
+        _LOGGER.debug("Fetching Shell EV location for external ID %s", location_id)
+
+        search_attempts: list[tuple[str, dict[str, Any]]] = [
+            (
+                "/locations",
+                {
+                    "locationExternalId": location_id,
+                    "perPage": 1,
+                    "pageNumber": 1,
+                },
+            )
+        ]
+
+        if latitude is not None and longitude is not None:
+            search_attempts.append(
+                (
+                    "/locations/nearby",
+                    {
+                        "latitude": latitude,
+                        "longitude": longitude,
+                        "limit": max(1, min(int(limit), 100)),
+                        "locationExternalId": location_id,
+                    },
+                )
             )
 
-        return self._parse_location(items[0])
+        last_payload: dict[str, Any] | None = None
+        for path, params in search_attempts:
+            result = await self._get_json(path, params)
+            last_payload = result
+            location = self._find_location_in_payload(result, location_id)
+            if location is not None:
+                return self._parse_location(location)
+
+        _LOGGER.debug(
+            "No Shell EV location found for external ID %s. Last payload: %s",
+            location_id,
+            last_payload,
+        )
+        raise ShellEvLocationNotFoundError(
+            f"No location returned for external ID '{location_id}'"
+        )
+
+    @staticmethod
+    def _find_location_in_payload(
+        payload: dict[str, Any], location_id: str
+    ) -> dict[str, Any] | None:
+        """Find a matching location object in a Shell EV API response."""
+        items = payload.get("data", [])
+        if isinstance(items, dict):
+            items = [items]
+        if not isinstance(items, list):
+            return None
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("externalId", "")).strip() == location_id:
+                return item
+
+        # When filtered by locationExternalId the API should only return matches.
+        if len(items) == 1 and isinstance(items[0], dict):
+            return items[0]
+
+        return None
 
     # ------------------------------------------------------------------
     # Internal parsing helpers
