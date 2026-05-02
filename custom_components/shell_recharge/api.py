@@ -200,6 +200,35 @@ class ShellEvApi:
         except ClientError as err:
             raise ShellEvApiError(f"Network error fetching {path}: {err}") from err
 
+    async def locations_nearby(
+        self,
+        latitude: float,
+        longitude: float,
+        limit: int = 25,
+        radius: int | None = None,
+    ) -> list[Location]:
+        """Return Shell EV locations near latitude/longitude.
+
+        Shell's OpenAPI exposes /locations/nearby with latitude, longitude and
+        limit. Some tenants also accept radius; when provided, we pass it through
+        because it is harmless for environments that support it and useful for
+        filtering in others.
+        """
+        params: dict[str, Any] = {
+            "latitude": float(latitude),
+            "longitude": float(longitude),
+            "limit": max(1, min(int(limit), 100)),
+        }
+        if radius is not None:
+            params["radius"] = max(1, int(radius))
+
+        _LOGGER.debug("Fetching nearby Shell EV locations with params %s", params)
+        result = await self._get_json("/locations/nearby", params)
+        locations = self._locations_from_payload(result)
+        if not locations:
+            raise ShellEvLocationNotFoundError("No nearby locations returned")
+        return locations
+
     async def location_by_id(
         self,
         location_id: str,
@@ -209,9 +238,8 @@ class ShellEvApi:
     ) -> Location:
         """Return a Location by external ID.
 
-        The Shell EV OpenAPI spec supports locationExternalId on /locations and
-        /locations/nearby. We try /locations first and optionally fall back to
-        /locations/nearby when latitude/longitude are configured.
+        Kept for backwards compatibility with existing single-location public
+        config entries.
         """
         location_id = str(location_id).strip()
         if not location_id:
@@ -259,6 +287,15 @@ class ShellEvApi:
         raise ShellEvLocationNotFoundError(
             f"No location returned for external ID '{location_id}'"
         )
+
+    def _locations_from_payload(self, payload: dict[str, Any]) -> list[Location]:
+        """Parse a list of locations from a Shell EV API response."""
+        items = payload.get("data", [])
+        if isinstance(items, dict):
+            items = [items]
+        if not isinstance(items, list):
+            return []
+        return [self._parse_location(item) for item in items if isinstance(item, dict)]
 
     @staticmethod
     def _find_location_in_payload(
