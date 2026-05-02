@@ -73,11 +73,17 @@ class ShellRechargeUserDataUpdateCoordinator(DataUpdateCoordinator[DetailedAsset
         )
 
 
-class ShellRechargePublicDataUpdateCoordinator(DataUpdateCoordinator[Location]):
+class ShellRechargePublicDataUpdateCoordinator(DataUpdateCoordinator[Location | list[Location]]):
     """Handles data updates for public chargers via the official Shell EV API."""
 
     def __init__(
-        self, hass: HomeAssistant, api: ShellEvApi, serial_number: SerialNumber
+        self,
+        hass: HomeAssistant,
+        api: ShellEvApi,
+        serial_number: SerialNumber | None = None,
+        latitude: float | None = None,
+        longitude: float | None = None,
+        limit: int = 25,
     ) -> None:
         """Initialize coordinator."""
         super().__init__(
@@ -88,44 +94,51 @@ class ShellRechargePublicDataUpdateCoordinator(DataUpdateCoordinator[Location]):
         )
         self.api = api
         self.serial_number = serial_number
+        self.latitude = latitude
+        self.longitude = longitude
+        self.limit = limit
 
-    async def _async_update_data(self) -> Location:
+    async def _async_update_data(self) -> Location | list[Location]:
         """Fetch location data from the Shell EV API."""
-        data = None
         try:
-            data = await self.api.location_by_id(self.serial_number)
+            if self.serial_number:
+                data = await self.api.location_by_id(self.serial_number)
+            elif self.latitude is not None and self.longitude is not None:
+                data = await self.api.locations_nearby(
+                    self.latitude,
+                    self.longitude,
+                    limit=self.limit,
+                )
+            else:
+                raise UpdateFailed("No public Shell Recharge lookup configured")
         except ShellEvAuthError as exc:
             _LOGGER.error(
-                "Authentication failed for Shell EV API. "
-                "Check your client_id and client_secret at developer.shell.com. Error: %s",
+                "Authentication failed for Shell EV API. Check your client_id and client_secret. Error: %s",
                 exc,
             )
             raise UpdateFailed(str(exc)) from exc
         except ShellEvApiError as exc:
-            _LOGGER.error(
-                "Error fetching charger %s: %s", self.serial_number, exc
-            )
+            _LOGGER.error("Error fetching public Shell Recharge locations: %s", exc)
             raise UpdateFailed(str(exc)) from exc
         except CancelledError as exc:
-            _LOGGER.error("CancelledError while fetching charger %s", self.serial_number)
+            _LOGGER.error("CancelledError while fetching public Shell Recharge locations")
             raise UpdateFailed() from exc
         except TimeoutError as exc:
-            _LOGGER.error("TimeoutError while fetching charger %s", self.serial_number)
+            _LOGGER.error("TimeoutError while fetching public Shell Recharge locations")
             raise UpdateFailed() from exc
         except ClientError as exc:
-            _LOGGER.error("ClientError while fetching charger %s", self.serial_number)
+            _LOGGER.error("ClientError while fetching public Shell Recharge locations")
             raise UpdateFailed() from exc
         except Exception as exc:
             _LOGGER.error(
-                "Unexpected error fetching charger %s: %s",
-                self.serial_number,
+                "Unexpected error fetching public Shell Recharge locations: %s",
                 exc,
                 exc_info=True,
             )
             raise UpdateFailed() from exc
 
-        if data is None:
-            _LOGGER.error("API returned None data for charger %s", self.serial_number)
-            raise UpdateFailed("API returned None data")
+        if not data:
+            _LOGGER.error("API returned empty data for public Shell Recharge locations")
+            raise UpdateFailed("API returned empty data")
 
         return data
