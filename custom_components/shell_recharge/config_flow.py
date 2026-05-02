@@ -11,6 +11,9 @@ from homeassistant import config_entries
 from homeassistant.data_entry_flow import section
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
@@ -27,14 +30,26 @@ RECHARGE_SCHEMA = vol.Schema(
         vol.Optional("public"): section(
             vol.Schema(
                 {
-                    vol.Optional("serial_number"): str,
-                    vol.Optional("client_id"): str,
-                    vol.Optional("client_secret"): TextSelector(
+                    vol.Required("client_id"): str,
+                    vol.Required("client_secret"): TextSelector(
                         TextSelectorConfig(type=TextSelectorType.PASSWORD)
                     ),
+                    vol.Required("latitude"): NumberSelector(
+                        NumberSelectorConfig(mode=NumberSelectorMode.BOX, step=0.000001)
+                    ),
+                    vol.Required("longitude"): NumberSelector(
+                        NumberSelectorConfig(mode=NumberSelectorMode.BOX, step=0.000001)
+                    ),
+                    vol.Optional("radius", default=5000): NumberSelector(
+                        NumberSelectorConfig(mode=NumberSelectorMode.BOX, min=100, max=50000, step=100)
+                    ),
+                    vol.Optional("limit", default=25): NumberSelector(
+                        NumberSelectorConfig(mode=NumberSelectorMode.BOX, min=1, max=100, step=1)
+                    ),
+                    vol.Optional("serial_number"): str,
                 }
             ),
-            {"collapsed": True},
+            {"collapsed": False},
         ),
         vol.Optional("private"): section(
             vol.Schema(
@@ -56,7 +71,7 @@ RECHARGE_SCHEMA = vol.Schema(
 class ShellRechargeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for shell_recharge_ev."""
 
-    VERSION = 4
+    VERSION = 5
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -70,14 +85,19 @@ class ShellRechargeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             pub = user_input.get("public") or {}
             priv = user_input.get("private") or {}
 
-            if pub.get("serial_number") and pub.get("client_id") and pub.get("client_secret"):
-                unique_id = pub["serial_number"]
+            if pub.get("client_id") and pub.get("client_secret") and pub.get("latitude") is not None and pub.get("longitude") is not None:
+                latitude = float(pub["latitude"])
+                longitude = float(pub["longitude"])
+                radius = int(pub.get("radius", 5000))
+                limit = int(pub.get("limit", 25))
+                unique_id = f"public-{latitude:.6f}-{longitude:.6f}-{radius}-{limit}"
                 api = ShellEvApi(
                     websession=async_get_clientsession(self.hass),
                     client_id=pub["client_id"],
                     client_secret=pub["client_secret"],
                 )
-                await api.location_by_id(unique_id)
+                # Validate OAuth and that the location search returns data.
+                await api.locations_nearby(latitude, longitude, limit=limit, radius=radius)
 
             elif priv.get("email") and priv.get("password"):
                 unique_id = priv["email"]
@@ -96,10 +116,12 @@ class ShellRechargeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
 
         except LoginFailedError:
             errors["base"] = "login_failed"
-        except ShellEvAuthError:
+        except ShellEvAuthError as exc:
             errors["base"] = "auth_failed"
-        except ShellEvLocationNotFoundError:
+            self.hass.logger.error("Shell Recharge authentication failed: %s", exc)
+        except ShellEvLocationNotFoundError as exc:
             errors["base"] = "empty_response"
+            self.hass.logger.error("Shell Recharge no public locations found: %s", exc)
         except (ClientError, TimeoutError, CancelledError):
             errors["base"] = "cannot_connect"
 
