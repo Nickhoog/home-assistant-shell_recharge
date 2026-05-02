@@ -18,7 +18,7 @@ from homeassistant.helpers.selector import (
 )
 from shellrecharge.user import LoginFailedError
 
-from .api import ShellEvApi, ShellEvAuthError, ShellEvLocationNotFoundError
+from .api import ShellEvApi, ShellEvApiError, ShellEvAuthError, ShellEvLocationNotFoundError
 from .const import DOMAIN
 
 import shellrecharge
@@ -36,13 +36,9 @@ RECHARGE_SCHEMA = vol.Schema(
                     ),
                     vol.Required("latitude"): vol.Coerce(float),
                     vol.Required("longitude"): vol.Coerce(float),
-                    vol.Optional("radius", default=5000): vol.All(
-                        vol.Coerce(int), vol.Range(min=100, max=50000)
-                    ),
                     vol.Optional("limit", default=25): vol.All(
                         vol.Coerce(int), vol.Range(min=1, max=100)
                     ),
-                    vol.Optional("serial_number"): str,
                 }
             ),
             {"collapsed": False},
@@ -89,16 +85,22 @@ class ShellRechargeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             ):
                 latitude = float(pub["latitude"])
                 longitude = float(pub["longitude"])
-                radius = int(pub.get("radius", 5000))
                 limit = int(pub.get("limit", 25))
-                unique_id = f"public-{latitude:.6f}-{longitude:.6f}-{radius}-{limit}"
+                unique_id = f"public-{latitude:.6f}-{longitude:.6f}-{limit}"
                 api = ShellEvApi(
                     websession=async_get_clientsession(self.hass),
                     client_id=pub["client_id"],
                     client_secret=pub["client_secret"],
                 )
-                # Validate OAuth and that the location search returns data.
-                await api.locations_nearby(latitude, longitude, limit=limit, radius=radius)
+                # Validate OAuth and the nearby search. Do not send radius; Shell sandbox rejects it in some tenants.
+                await api.locations_nearby(latitude, longitude, limit=limit)
+                user_input["public"] = {
+                    "client_id": pub["client_id"],
+                    "client_secret": pub["client_secret"],
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "limit": limit,
+                }
 
             elif priv.get("email") and priv.get("password"):
                 unique_id = priv["email"]
@@ -123,9 +125,12 @@ class ShellRechargeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         except ShellEvLocationNotFoundError as exc:
             errors["base"] = "empty_response"
             _LOGGER.error("Shell Recharge no public locations found: %s", exc)
-        except (ClientError, TimeoutError, CancelledError) as exc:
+        except (ShellEvApiError, ClientError, TimeoutError, CancelledError) as exc:
             errors["base"] = "cannot_connect"
-            _LOGGER.error("Shell Recharge connection failed: %s", exc)
+            _LOGGER.error("Shell Recharge API/connection failed: %s", exc)
+        except Exception as exc:  # noqa: BLE001
+            errors["base"] = "unknown"
+            _LOGGER.exception("Unexpected Shell Recharge config-flow error: %s", exc)
 
         if not errors:
             await self.async_set_unique_id(unique_id)
