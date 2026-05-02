@@ -1,4 +1,4 @@
-"""Async client for the official Shell EV API (api.shell.com/ev/v1)."""
+"""Async client for the official Shell EV API (sandbox/test)."""
 
 from __future__ import annotations
 
@@ -13,8 +13,9 @@ from aiohttp.client_exceptions import ClientError
 
 _LOGGER = logging.getLogger(__name__)
 
-OAUTH_URL = "https://api.shell.com/v2/oauth/token"
-API_BASE = "https://api.shell.com/ev/v1"
+# Sandbox/test endpoints. Switch these to api.shell.com for production later.
+OAUTH_URL = "https://api-test.shell.com/v2/oauth/token"
+API_BASE = "https://api-test.shell.com/ev/v1"
 
 
 class ShellEvApiError(Exception):
@@ -31,8 +32,6 @@ class ShellEvLocationNotFoundError(ShellEvApiError):
 
 @dataclass
 class ElectricalProperties:
-    """Connector electrical properties."""
-
     powerType: str = ""
     voltage: float = 0.0
     amperage: float = 0.0
@@ -41,8 +40,6 @@ class ElectricalProperties:
 
 @dataclass
 class Tariff:
-    """Connector tariff information."""
-
     startFee: float = 0.0
     perMinute: float = 0.0
     perKWh: float = 0.0
@@ -54,8 +51,6 @@ class Tariff:
 
 @dataclass
 class Connector:
-    """Single connector on an EVSE."""
-
     uid: int = 0
     externalId: str = ""
     connectorType: str = "Unspecified"
@@ -66,8 +61,6 @@ class Connector:
 
 @dataclass
 class Evse:
-    """Electric Vehicle Supply Equipment unit."""
-
     uid: int = 0
     externalId: str = ""
     evseId: str = ""
@@ -77,16 +70,12 @@ class Evse:
 
 @dataclass
 class Coordinates:
-    """Geographic coordinates."""
-
     latitude: float = 0.0
     longitude: float = 0.0
 
 
 @dataclass
 class Address:
-    """Location address."""
-
     streetAndNumber: str = ""
     postalCode: str = ""
     city: str = ""
@@ -95,15 +84,11 @@ class Address:
 
 @dataclass
 class AccessibilityV2:
-    """Accessibility status."""
-
     status: str = ""
 
 
 @dataclass
 class Location:
-    """Shell Recharge charging location with one or more EVSEs."""
-
     uid: int = 0
     externalId: str = ""
     coordinates: Coordinates = field(default_factory=Coordinates)
@@ -116,23 +101,16 @@ class Location:
     openTwentyFourSeven: bool = True
 
 
-# Status values returned by the Shell EV API
 EVSE_STATUS_OPTIONS = ["Available", "Occupied", "Unavailable", "Unknown"]
 
 
 class ShellEvApi:
     """Async client for the Shell EV public locations API."""
 
-    def __init__(
-        self,
-        websession: ClientSession,
-        client_id: str,
-        client_secret: str,
-    ) -> None:
-        """Initialise with aiohttp session and OAuth2 credentials."""
+    def __init__(self, websession: ClientSession, client_id: str, client_secret: str) -> None:
         self._session = websession
-        self._client_id = client_id
-        self._client_secret = client_secret
+        self._client_id = client_id.strip()
+        self._client_secret = client_secret.strip()
         self._access_token: str | None = None
         self._token_expires_at: datetime = datetime.min
 
@@ -141,7 +119,7 @@ class ShellEvApi:
         if self._access_token and datetime.now() < self._token_expires_at:
             return self._access_token
 
-        _LOGGER.debug("Fetching new Shell EV API OAuth2 token")
+        _LOGGER.debug("Fetching new Shell EV API OAuth2 token from sandbox")
         try:
             async with self._session.post(
                 OAUTH_URL,
@@ -150,27 +128,31 @@ class ShellEvApi:
                     "client_id": self._client_id,
                     "client_secret": self._client_secret,
                 },
-                headers={"Accept": "application/json"},
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
                 timeout=None,
             ) as resp:
+                body = await resp.text()
                 if resp.status in (401, 403):
                     raise ShellEvAuthError(
-                        "Invalid client_id or client_secret. "
-                        "Register at developer.shell.com to obtain credentials."
+                        f"Sandbox OAuth rejected credentials with HTTP {resp.status}: {body[:500]}"
                     )
-                resp.raise_for_status()
+                if resp.status >= 400:
+                    raise ShellEvApiError(
+                        f"Sandbox OAuth returned HTTP {resp.status}: {body[:500]}"
+                    )
                 data = await resp.json()
         except ClientError as err:
             raise ShellEvApiError(f"Network error fetching OAuth token: {err}") from err
 
         self._access_token = data["access_token"]
         expires_in = int(data.get("expires_in", 3600))
-        # Refresh 60 s before expiry to avoid edge-case failures
         self._token_expires_at = datetime.now() + timedelta(seconds=max(expires_in - 60, 0))
         return self._access_token
 
     async def _get_json(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
-        """GET a Shell EV API endpoint and return the JSON body."""
         token = await self._get_token()
         request_id = str(uuid.uuid4())
 
@@ -185,16 +167,15 @@ class ShellEvApi:
                 },
                 timeout=None,
             ) as resp:
+                body = await resp.text()
                 if resp.status == 401:
-                    # Token may have been revoked; clear cache and raise
                     self._access_token = None
-                    raise ShellEvAuthError("Bearer token rejected by API")
+                    raise ShellEvAuthError(f"Bearer token rejected by sandbox API: {body[:500]}")
                 if resp.status == 404:
                     raise ShellEvLocationNotFoundError(f"Endpoint {path} returned 404")
                 if resp.status >= 400:
-                    body = await resp.text()
                     raise ShellEvApiError(
-                        f"Shell EV API returned HTTP {resp.status} for {path}: {body[:500]}"
+                        f"Sandbox Shell EV API returned HTTP {resp.status} for {path}: {body[:500]}"
                     )
                 return await resp.json()
         except ClientError as err:
@@ -207,13 +188,6 @@ class ShellEvApi:
         limit: int = 25,
         radius: int | None = None,
     ) -> list[Location]:
-        """Return Shell EV locations near latitude/longitude.
-
-        Shell's OpenAPI exposes /locations/nearby with latitude, longitude and
-        limit. Some tenants also accept radius; when provided, we pass it through
-        because it is harmless for environments that support it and useful for
-        filtering in others.
-        """
         params: dict[str, Any] = {
             "latitude": float(latitude),
             "longitude": float(longitude),
@@ -222,11 +196,11 @@ class ShellEvApi:
         if radius is not None:
             params["radius"] = max(1, int(radius))
 
-        _LOGGER.debug("Fetching nearby Shell EV locations with params %s", params)
+        _LOGGER.debug("Fetching nearby Shell EV sandbox locations with params %s", params)
         result = await self._get_json("/locations/nearby", params)
         locations = self._locations_from_payload(result)
         if not locations:
-            raise ShellEvLocationNotFoundError("No nearby locations returned")
+            raise ShellEvLocationNotFoundError("No nearby sandbox locations returned")
         return locations
 
     async def location_by_id(
@@ -236,28 +210,13 @@ class ShellEvApi:
         longitude: float | None = None,
         limit: int = 25,
     ) -> Location:
-        """Return a Location by external ID.
-
-        Kept for backwards compatibility with existing single-location public
-        config entries.
-        """
         location_id = str(location_id).strip()
         if not location_id:
             raise ShellEvLocationNotFoundError("No location external ID supplied")
 
-        _LOGGER.debug("Fetching Shell EV location for external ID %s", location_id)
-
         search_attempts: list[tuple[str, dict[str, Any]]] = [
-            (
-                "/locations",
-                {
-                    "locationExternalId": location_id,
-                    "perPage": 1,
-                    "pageNumber": 1,
-                },
-            )
+            ("/locations", {"locationExternalId": location_id, "perPage": 1, "pageNumber": 1})
         ]
-
         if latitude is not None and longitude is not None:
             search_attempts.append(
                 (
@@ -271,25 +230,15 @@ class ShellEvApi:
                 )
             )
 
-        last_payload: dict[str, Any] | None = None
         for path, params in search_attempts:
             result = await self._get_json(path, params)
-            last_payload = result
             location = self._find_location_in_payload(result, location_id)
             if location is not None:
                 return self._parse_location(location)
 
-        _LOGGER.debug(
-            "No Shell EV location found for external ID %s. Last payload: %s",
-            location_id,
-            last_payload,
-        )
-        raise ShellEvLocationNotFoundError(
-            f"No location returned for external ID '{location_id}'"
-        )
+        raise ShellEvLocationNotFoundError(f"No location returned for external ID '{location_id}'")
 
     def _locations_from_payload(self, payload: dict[str, Any]) -> list[Location]:
-        """Parse a list of locations from a Shell EV API response."""
         items = payload.get("data", [])
         if isinstance(items, dict):
             items = [items]
@@ -298,31 +247,18 @@ class ShellEvApi:
         return [self._parse_location(item) for item in items if isinstance(item, dict)]
 
     @staticmethod
-    def _find_location_in_payload(
-        payload: dict[str, Any], location_id: str
-    ) -> dict[str, Any] | None:
-        """Find a matching location object in a Shell EV API response."""
+    def _find_location_in_payload(payload: dict[str, Any], location_id: str) -> dict[str, Any] | None:
         items = payload.get("data", [])
         if isinstance(items, dict):
             items = [items]
         if not isinstance(items, list):
             return None
-
         for item in items:
-            if not isinstance(item, dict):
-                continue
-            if str(item.get("externalId", "")).strip() == location_id:
+            if isinstance(item, dict) and str(item.get("externalId", "")).strip() == location_id:
                 return item
-
-        # When filtered by locationExternalId the API should only return matches.
         if len(items) == 1 and isinstance(items[0], dict):
             return items[0]
-
         return None
-
-    # ------------------------------------------------------------------
-    # Internal parsing helpers
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _parse_connector(data: dict) -> Connector:
@@ -356,9 +292,7 @@ class ShellEvApi:
             externalId=data.get("externalId", ""),
             evseId=data.get("evseId", ""),
             status=data.get("status", "Unknown"),
-            connectors=[
-                self._parse_connector(c) for c in (data.get("connectors") or [])
-            ],
+            connectors=[self._parse_connector(c) for c in (data.get("connectors") or [])],
         )
 
     def _parse_location(self, data: dict) -> Location:
