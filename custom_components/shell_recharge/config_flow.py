@@ -18,7 +18,6 @@ from homeassistant.helpers.selector import (
 )
 from shellrecharge.user import LoginFailedError
 
-from .api import ShellEvApi, ShellEvApiError, ShellEvAuthError, ShellEvLocationNotFoundError
 from .const import DOMAIN
 
 import shellrecharge
@@ -87,13 +86,6 @@ class ShellRechargeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                 longitude = float(pub["longitude"])
                 limit = int(pub.get("limit", 25))
                 unique_id = f"public-{latitude:.6f}-{longitude:.6f}-{limit}"
-                api = ShellEvApi(
-                    websession=async_get_clientsession(self.hass),
-                    client_id=pub["client_id"],
-                    client_secret=pub["client_secret"],
-                )
-                # Validate OAuth and the nearby search. Do not send radius; Shell sandbox rejects it in some tenants.
-                await api.locations_nearby(latitude, longitude, limit=limit)
                 user_input["public"] = {
                     "client_id": pub["client_id"],
                     "client_secret": pub["client_secret"],
@@ -119,15 +111,9 @@ class ShellRechargeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
 
         except LoginFailedError:
             errors["base"] = "login_failed"
-        except ShellEvAuthError as exc:
-            errors["base"] = "auth_failed"
-            _LOGGER.error("Shell Recharge authentication failed: %s", exc)
-        except ShellEvLocationNotFoundError as exc:
-            errors["base"] = "empty_response"
-            _LOGGER.error("Shell Recharge no public locations found: %s", exc)
-        except (ShellEvApiError, ClientError, TimeoutError, CancelledError) as exc:
+        except (ClientError, TimeoutError, CancelledError) as exc:
             errors["base"] = "cannot_connect"
-            _LOGGER.error("Shell Recharge API/connection failed: %s", exc)
+            _LOGGER.error("Shell Recharge connection failed: %s", exc)
         except Exception as exc:  # noqa: BLE001
             errors["base"] = "unknown"
             _LOGGER.exception("Unexpected Shell Recharge config-flow error: %s", exc)
